@@ -66,6 +66,21 @@ class KVM:
         else:
             open(monport_file, 'w').write(str(port))
 
+    def getVNCDisplay(self):
+        vnc_file = os.path.join( self.path, 'vnc')
+        if os.path.exists(vnc_file):
+            vncdisplay = open(vnc_file).read(256).strip()
+            return int(vncdisplay)
+        else:
+            return None
+
+    def setVNCDisplay(self, vncdisplay):
+        vnc_file = os.path.join( self.path, 'vnc')
+        if vncdisplay == None:
+            os.unlink(vnc_file)
+        else:
+            open(vnc_file, 'w').write(str(vncdisplay))
+
     def isRunning(self):
         pid = self.getPid()
         if pid:
@@ -97,15 +112,26 @@ class KVM:
         monport = s.getsockname()[1]
         del s
 
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(('', 0))
+        vncdisplay = s.getsockname()[1] - 5900
+        del s
+
         opts = []
         opts.append('kvm')
         opts.append('-monitor')
         opts.append('tcp:localhost:%s,server,nowait' % monport)
+        opts.append('-vnc')
+        opts.append('localhost:%s' % vncdisplay)
+        opts.append('-usbdevice')
+        opts.append('tablet')
+
         opts.extend(self.getOptions())
 
         p = subprocess.Popen(opts)
         self.setPid(p.pid)
         self.setMonPort(monport)
+        self.setVNCDisplay(vncdisplay)
         print 'Started (pid %s)' % p.pid
 
     def stop(self):
@@ -116,6 +142,7 @@ class KVM:
         os.kill(pid, 15)
         self.setPid(None)
         self.setMonPort(None)
+        self.setVNCDisplay(None)
         print 'Stoped (pid %s)' % pid
 
 
@@ -136,6 +163,15 @@ class KVM:
         self.sendMonComand('system_reset')
         print 'Rebooted'
 
+    def display(self):
+        opts = []
+        opts.append('vncviewer')
+        opts.append('-Log=*:stderr:0')
+        opts.append('localhost:%s' % (self.getVNCDisplay() + 5900))
+        #my vnc viewer like uses port numbers when the value is over 100
+
+        p = subprocess.Popen(opts)
+
 def usage():
     print '<start|stop|info> [machine dir]*'
 
@@ -145,6 +181,7 @@ def main(argv):
         'stop' : KVM.stop,
         'info' : KVM.info,
         'reboot' : KVM.reboot,
+        'display' : KVM.display,
     }
 
     option = argv[1]
@@ -152,6 +189,7 @@ def main(argv):
 
     if option not in OPTIONS:
         usage()
+        return
 
     for machine in machines:
         if os.path.isdir(machine):
