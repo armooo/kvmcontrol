@@ -5,6 +5,7 @@ import os
 import errno
 import glob
 import subprocess
+import socket
 
 class KVMException(Exception):
     pass
@@ -50,7 +51,22 @@ class KVM:
         else:
             open(pid_file, 'w').write(str(pid))
 
-    def start(self):
+    def getMonPort(self):
+        monport_file = os.path.join( self.path, 'monport')
+        if os.path.exists(monport_file):
+            monport = open(monport_file).read(256).strip()
+            return int(monport)
+        else:
+            return None
+
+    def setMonPort(self, port):
+        monport_file = os.path.join( self.path, 'monport')
+        if port == None:
+            os.unlink(monport_file)
+        else:
+            open(monport_file, 'w').write(str(port))
+
+    def isRunning(self):
         pid = self.getPid()
         if pid:
             try:
@@ -58,20 +74,48 @@ class KVM:
             except os.error, e:
                 if e.errno == errno.ESRCH:
                     self.setPid(None)
+                    return False
                 else:
-                    raise KVMException('Already running')
+                    return True
             else:
-                raise KVMException('Already running')
+                return True
 
-        opts = self.getOptions()
-        print opts
-        p = subprocess.Popen(['kvm'] + opts)
+        return False
+
+    def sendMonComand(self, command):
+        port = self.getMonPort()
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.connect(('localhost', port))
+        s.send(command + '\r\n')
+
+    def start(self):
+        if self.isRunning():
+            raise KVMException('Already running')
+
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(('', 0))
+        monport = s.getsockname()[1]
+        del s
+
+        opts = []
+        opts.append('kvm')
+        opts.append('-monitor')
+        opts.append('tcp:localhost:%s,server,nowait' % monport)
+        opts.extend(self.getOptions())
+
+        p = subprocess.Popen(opts)
         self.setPid(p.pid)
+        self.setMonPort(monport)
         print 'Started (pid %s)' % p.pid
 
     def stop(self):
+        if not self.isRunning():
+            raise KVMException('Not running')
+
         pid = self.getPid()
         os.kill(pid, 15)
+        self.setPid(None)
+        self.setMonPort(None)
         print 'Stoped (pid %s)' % pid
 
 
@@ -83,20 +127,14 @@ class KVM:
             else:
                 print opt
 
-        pid = self.getPid()
-        if pid:
-            try:
-                os.kill(pid, 0)
-            except os.error, e:
-                if e.errno == errno.ESRCH:
-                    self.setPid(None)
-                    print 'Stopped'
-                else:
-                    print 'Running (pid %s)' % pid
-            else:
-                print 'Running (pid %s)' % pid
+        if self.isRunning():
+            print 'Running (pid %s)' % self.getPid()
         else:
             print 'Stopped'
+
+    def reboot(self):
+        self.sendMonComand('system_reset')
+        print 'Rebooted'
 
 def usage():
     print '<start|stop|info> [machine dir]*'
@@ -106,6 +144,7 @@ def main(argv):
         'start' : KVM.start,
         'stop' : KVM.stop,
         'info' : KVM.info,
+        'reboot' : KVM.reboot,
     }
 
     option = argv[1]
