@@ -6,13 +6,18 @@ import errno
 import glob
 import subprocess
 import socket
+import stat
+import random
+import string
 
 class KVMException(Exception):
     pass
 
 class KVM:
+
     def __init__(self, path):
         self.path = path
+        self.taps = []
 
     def getOptions(self):
         DISK_NAMES = ['fda', 'fdb', 'hda', 'hdb', 'hdc', 'hdd', 'cdrom']
@@ -51,21 +56,6 @@ class KVM:
         else:
             open(pid_file, 'w').write(str(pid))
 
-    def getMonPort(self):
-        monport_file = os.path.join( self.path, 'monport')
-        if os.path.exists(monport_file):
-            monport = open(monport_file).read(256).strip()
-            return int(monport)
-        else:
-            return None
-
-    def setMonPort(self, port):
-        monport_file = os.path.join( self.path, 'monport')
-        if port == None:
-            os.unlink(monport_file)
-        else:
-            open(monport_file, 'w').write(str(port))
-
     def getVNCDisplay(self):
         vnc_file = os.path.join( self.path, 'vnc')
         if os.path.exists(vnc_file):
@@ -80,6 +70,25 @@ class KVM:
             os.unlink(vnc_file)
         else:
             open(vnc_file, 'w').write(str(vncdisplay))
+
+    def getVNCPassword(self):
+        vncpass_file = os.path.join( self.path, 'vncpass')
+        if os.path.exists(vncpass_file):
+            password = open(vncpass_file).read(256).strip()
+            return password
+        else:
+            return None
+
+    def setVNCPassword(self, password):
+        vncpass_file = os.path.join( self.path, 'vncpass')
+        if password == None:
+            os.unlink(vncpass_file)
+        else:
+            f = open(vncpass_file, 'w')
+            os.chmod(vncpass_file, stat.S_IRUSR | stat.S_IWUSR)
+            f.write(str(password))
+
+        self.sendMonComand('change vnc password\r\n%s\r\n' % password)
 
     def isRunning(self):
         pid = self.getPid()
@@ -98,9 +107,9 @@ class KVM:
         return False
 
     def sendMonComand(self, command):
-        port = self.getMonPort()
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.connect(('localhost', port))
+        mon_socket = os.path.join(self.path, 'mon')
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.connect(mon_socket)
         s.send(command + '\r\n')
 
     def start(self):
@@ -109,18 +118,17 @@ class KVM:
 
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.bind(('', 0))
-        monport = s.getsockname()[1]
-        del s
-
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.bind(('', 0))
         vncdisplay = s.getsockname()[1] - 5900
         del s
+
+        mon_socket = os.path.join(self.path, 'mon')
+
+        password = ''.join([random.choice(string.printable) for i in range(8)])
 
         opts = []
         opts.append('kvm')
         opts.append('-monitor')
-        opts.append('tcp:localhost:%s,server,nowait' % monport)
+        opts.append('unix:%s,server,nowait' % mon_socket)
         opts.append('-vnc')
         opts.append('localhost:%s' % vncdisplay)
         opts.append('-usbdevice')
@@ -130,21 +138,26 @@ class KVM:
 
         p = subprocess.Popen(opts)
         self.setPid(p.pid)
-        self.setMonPort(monport)
         self.setVNCDisplay(vncdisplay)
+
+        #VNC passwords don't seem to want to work
+        #while not os.path.exists(mon_socket):
+        #    pass
+        #self.setVNCPassword(password)
         print 'Started (pid %s)' % p.pid
 
     def stop(self):
         if not self.isRunning():
             raise KVMException('Not running')
 
+        mon_socket = os.path.join(self.path, 'mon')
+
         pid = self.getPid()
         os.kill(pid, 15)
         self.setPid(None)
-        self.setMonPort(None)
         self.setVNCDisplay(None)
+        os.unlink(mon_socket)
         print 'Stoped (pid %s)' % pid
-
 
     def info(self):
         print '\tOptions: '
@@ -153,7 +166,9 @@ class KVM:
                 print '\t\t%s ' % opt,
             else:
                 print opt
+        self. status()
 
+    def status(self):
         if self.isRunning():
             print 'Running (pid %s)' % self.getPid()
         else:
@@ -164,39 +179,51 @@ class KVM:
         print 'Rebooted'
 
     def display(self):
+        if not self.isRunning():
+            raise KVMException('Not running')
+
         opts = []
         opts.append('vncviewer')
         opts.append('-Log=*:stderr:0')
+        opts.append('-passwd')
+        opts.append( os.path.join(self.path, 'vncpass') )
         opts.append('localhost:%s' % (self.getVNCDisplay() + 5900))
         #my vnc viewer like uses port numbers when the value is over 100
 
         p = subprocess.Popen(opts)
 
+
+    OPTIONS = {
+        'start' : start,
+        'stop' : stop,
+        'info' : info,
+        'reboot' : reboot,
+        'display' : display,
+        'status' : status,
+    }
+
+
+
 def usage():
-    print '<start|stop|info> [machine dir]*'
+    print '<%s> [machine dirs]' % ('|'.join(KVM.OPTIONS.keys()))
 
 def main(argv):
-    OPTIONS = {
-        'start' : KVM.start,
-        'stop' : KVM.stop,
-        'info' : KVM.info,
-        'reboot' : KVM.reboot,
-        'display' : KVM.display,
-    }
 
     option = argv[1]
     machines = argv[2:]
 
-    if option not in OPTIONS:
+    if option not in KVM.OPTIONS:
         usage()
         return
 
     for machine in machines:
         if os.path.isdir(machine):
+            if machine.endswith('/'):
+                machine = machine[:-1]
             print 'Machine %s' % os.path.basename(machine)
             m = KVM(machine)
             try:
-                OPTIONS[option](m)
+                KVM.OPTIONS[option](m)
             except KVMException, e:
                 print e
             print
